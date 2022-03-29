@@ -1,0 +1,4 @@
+Size: (5, 5)
+Mines: (0, 0)(0, 1)
+Flags: (0, 1)
+Uncovered: (0, 0)(0, 2)

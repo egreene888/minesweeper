@@ -2,175 +2,217 @@
 solver.py
 
 We've implemented a minesweeper game, now we need to make an AI to solve it
+This edition re-writes and re-factors some of the code.
+
+Author: Evan Greene
+Date: 2022-02-28
 """
-
-from tkinter import *
-from tkinter import ttk
-from tkinter import font
-
-import threading
-import logging
-import time
-import random
-import math
-
 import board
+import random
+import threading
+from collections import deque
+import time
+from itertools import combinations
 
+import logging
+# if __name__ == "__main__":
+    # if we're importing this in another module, don't configure the logging.
+    # that way it won't actually do any logging.
+logging.basicConfig(format = "%(message)s", level = logging.INFO)
+
+# timer strategies
+INSTANT = 0
+QUICK_MOVE = 1
+SLOW_MOVE = 2
+USER_INPUT = 3
+
+# don't make guesses as fast as the computer can, use a timer.
 MOVE_TIME = 0.5
-WATCHDOG_TIME = 0.2
-POSSIBILITY_CAP = 20
-NUM_RANDOM_GUESSES = 100000
-STEP_DEBUG = False
 
-
-class computerBoard(board.board):
+class Solver(object):
     """
-    Extend the board of the original minesweeper game to make it
-    play well with an AI.
+    This class serves as an interface between the board object and the
+    logic of the solver. Sets up the threading and defines an API for the
+    interaction.
+
+    Other solvers will have this solver as a base class.
     """
-    # Extend the constructor, gameOver, checkVictory and restart functions
-    # to add a flag that tells us whether we've won.
-    def __init__(self, rows, cols, mines):
-        self.win = None
-        return super().__init__(rows, cols, mines)
 
-    def gameOver(self):
-        self.win = False
-        return super().gameOver()
+    repeat = True
+    timing = SLOW_MOVE
 
-    def checkVictory(self):
-        victory = super().checkVictory()
-        if victory:
-            self.win = True
-        return victory
-
-    def restart(self):
-        self.win = None
-        return super().restart()
-
-    # write helper functions to easily access the information available to
-    # the user -- tile flag, tile cover,tile number.
-    def isFlag(self, row, col):
-        return self.isCovered(row, col) and self.tiles[row][col].flag
-
-    def getNumber(self, row, col):
-        if not self.isCovered(row, col):
-            return self.tiles[row][col].number
-
-    def isCovered(self, row, col):
-        return self.tiles[row][col].covered
-
-    def releaseWait(self):
-        """ for debugging use only """
-
-    # Extend the primaryClick, secondaryClick, and doubleClick methods
-    # to add support for multi-threading.
-class solver(object):
-    """
-    An object that handles solving the board and deals with the multithreading
-    Comes with a basic guesser that will just guess randomly.
-    """
     def __init__(self, game):
-        """
-        Template constructor for solvers.
-        Saves the board as input and sets up the multithreading
-        """
         self.board = game
+        self.queue = SolverQueue([])
         # create a separate thread to call the solve() function.
         self.solverThread = threading.Thread(target = self.solve, name = 'solver')
         self.solverThread.daemon = True
 
-        # create a debugging condition that will pause execution of the solver
-        # thread until the button is pressed.
-        if STEP_DEBUG:
-            self.waitForClick = threading.Event()
-            self.stepDebugButton = Button(self.board.window, text = "STEP", command = self.releaseWait())
-            self.stepDebugButton.grid(row = self.board.rows + 2, columnspan = self.board.cols)
-        # also create a watchdog thread to keep up on whether the others
-        # are alive.
-        # self.watchdogThread = threading.Thread(target = self.checkThreads, name = 'watchdog')
-        # self.watchdogThread.daemon = True
-        return
+        if self.timing == USER_INPUT:
+            self.board.addUserInput()
+            self.board.hold = True
 
     def start(self):
-        """Gets the show on the road. Takes no arguments and returns the
-        victory variable"""
-        # if the solver board isn't in the ready-to-start state, restart it
-        if not self.board.firstClick:
-            self.board.restart()
-            time.sleep(0.5)
+        """
+        Invokes the start of the threads for the game and the solver
+        """
+        # # if the solver board isn't in the ready-to-start state, restart it
+        # if not self.board.firstClick:
+        #     self.board.restart()
+        #     time.sleep(MOVE_TIME)
+
         # start the solver thread
         self.solverThread.start()
-        # back to the main thread-- run the actual game
-        self.board.show()
 
-        return self.win
+        self.board.show()
+        return
 
     def solve(self):
         """
-        Template solver function.
-        Makes a guess at regular intervals specified by MOVE_TIME
+        Gets the show on the road.
+        Performs all the moves in the queue. When the queue is empty, calls the
+        guess function to get more, until the victory variable is set.
+
+        Takes no arguments and returns the victory variable
         """
-        guessCounter = 0
-        while self.board.win is None:
-            startGuess = time.time()
-            stopGuess = startGuess + MOVE_TIME
-            # get a list of guesses.
-            # logging.info("Taking a guess")
-            guesses, action = self.guess()
-            for guess in guesses:
-                if action == 'flag':
-                    self.board.secondaryClick(*guess)
-                elif action == 'click':
-                    self.board.primaryClick(*guess)
-                    # logging.info("returned from primaryClick")
-                elif action == 'double':
-                    self.board.doubleClick(*guess)
-                else:
-                    logging.warn("{} was a bad guess".format(guess))
-                guessCounter += 1
-            # implement a pause to wait for the user to click the button.
-            if STEP_DEBUG:
-                if action == 'click':
-                    logging.info("waiting for user input \n\n")
-                    self.waitForClick.wait(timeout = 10)
-                    self.waitForClick.clear()
-            # wait half a second.
-            while time.time() < stopGuess:
-                time.sleep(0.01)
-            # logging.info(self.board.win)
-        # idle until the board is restarted.
-        # while(1):
-        #     logging.info("idling until restart")
-        #     try:
-        #         exists = self.board.window.winfo_exists()
-        #     except RuntimeError:
-        #         exists = False
-        #     if not exists:
-        #         # self.board.tk.destroy()
-        #         return
-        #     if self.board.firstClick:
-        #         break
-        #     else:
-        #         time.sleep(0.5)
+        while True:
+            self.victory = None
+            while self.victory is None:
+
+                # start the timer.
+                startTime = time.time()
+                stopTime = startTime + MOVE_TIME
+
+                if len(self.queue) == 0:
+                    try:
+                        self.guess()
+                        self.validateQueue()
+                    except SolverError as e:
+                        # try to fail cleanly.
+                        self.board.window.quit()
+                        raise SystemExit from e
+                        
+                    if self.timing == QUICK_MOVE:
+                        waitUntil(stopTime)
+
+                nextGuess = self.queue.popleft()
+                if nextGuess.getAction() == 'click':
+                    self.board.primaryClick(*nextGuess.getTile())
+                elif nextGuess.getAction() == 'flag':
+                    if not self.isFlag(*nextGuess.getTile()):
+                        self.board.secondaryClick(*nextGuess.getTile())
+                elif nextGuess.getAction() == 'double':
+                    self.board.doubleClick(*nextGuess.getTile())
+
+                self.victory = self.board.victory
+
+                if self.timing == SLOW_MOVE:
+                    waitUntil(stopTime)
+                elif self.timing == USER_INPUT:
+                    self.board.hold = True
+                    while self.board.hold:
+                        time.sleep(0.01)
+            # end while self.victory is None
+
+            # once the game is complete (victory or failure), check the
+            # loopForever variable
+            if self.repeat:
+                if self.timing != INSTANT:
+                    # wait for a human to hit the restart button.
+                    while not self.board.firstClick:
+                        time.sleep(MOVE_TIME)
+                # reset before going back into the loop.
+                self.reset()
+            else:
+                # break out of the while loop and exit the thread.
+                break
+        # end while
         # once we're done, close the Tk window.
-        self.win = self.board.win
-        self.board.tk.quit()
+        self.board.window.quit()
         # kill the current thread if it's not somehow the main one
         if threading.current_thread() is not threading.main_thread():
             raise SystemExit
+
         return
+    # end def solve
 
     def guess(self):
         """
-        Template guesser.
-        Literally picks a tile at random from the covered tiles still on the
-        board
+        This is a template function. It guesses at random from among all the
+        tiles that are covered.
+
+        Takes no input and returns None; only the self.queue variable will
+        be modified.
+
+        Implementations of actual solvers will overwrite
         """
-        while(1):
-            guess = self.pickRandom()
-            if self.board.isCovered(*guess) is True:
-                return [guess], 'click'
+
+        while True:
+            guessRow = random.randrange(self.board.rows)
+            guessCol = random.randrange(self.board.cols)
+
+            if self.isCovered(guessRow, guessCol):
+                self.queue.add(guessRow, guessCol, 'click')
+                return
+
+    def user_guess(self):
+        """
+        gets a guess from the user
+        """
+        row = int(input("Enter the Row: "))
+        col = int(input("Enter the Column: "))
+        action = input("Enter the action: ")
+        self.queue.add(row, col, action)
+        return
+
+    def validateQueue(self):
+        """
+        A helper function for debugging. Makes sure the action and the tile
+        are valid guesses
+        """
+        for item in self.queue:
+            # The way this will work is that there is a string for the error
+            # message. Rather than raise at each check, add to the error message.
+            # Then check the string at the end to decide whether to raise.
+            # Allows multiple problems to be caught in one error message.
+            message = ""
+            # check that the row and column are within the board.
+            if (item.row < 0) or (item.row > self.board.rows):
+                message += "Guessed Row must be in range {} to {} \n".format(0, self.board.rows)
+            if (item.col < 0) or (item.row > self.board.rows):
+                message += "Guessed Column must be in range {} to {} \n".format(0, self.board.cols)
+            if item.action not in ['click', 'double', 'flag']:
+                message += "Invalid action {} \n".format('\'' + item.action + '\'')
+            if self.isFlag(*item.getTile()):
+                if item.action == 'click':
+                    message += "Cannot click a flagged tile \n"
+                elif item.action == 'double':
+                    message += "Cannot double-click a flagged tile \n"
+                elif item.action == 'flag':
+                    message += "Cannot un-flag already flagged tile \n"
+            elif item.action == 'click':
+                if not self.isCovered(*item.getTile()):
+                    message += "Tile cannot be clicked on if uncovered \n"
+            elif item.action == 'flag':
+                if not self.isCovered(*item.getTile()):
+                    message += "Tile cannot be flagged if uncovered \n"
+            elif item.action == 'double':
+                if self.isCovered(*item.getTile()):
+                    message += "Cannot double-click on a covered tile\n"
+                # check if we're double-clicking on a tile with no nearby mines
+                for neighbor in self.board.getNeighbors(*item.getTile()):
+                    if self.isCovered(*neighbor):
+                        break
+                else:
+                    message += "Cannot double click: No covered tiles nearby \n"
+
+            if message:
+                message = "Invalid Guess {}: \n".format(item.getTile()) + message
+                raise SolverError(message)
+                break
+        # end for
+        return
+    # end def validateQueue
 
     def pickRandom(self):
         """
@@ -178,334 +220,566 @@ class solver(object):
         """
         random.seed()
         guessPos = random.randint(0, self.board.tileCount - 1)
-        # print(minePos)
         guessRow = guessPos // self.board.cols
         guessCol = guessPos % self.board.cols
         return (guessRow, guessCol)
 
-    def lookForDoubleClick(self):
+    def reset(self):
         """
-        look for places where the number of flagged tiles is equal to the
-        number of the tile. Then we can doubleClick on the tile.
+        Deletes all the stored information about the state of the board.
         """
-        for i in range(self.board.rows):
-            for j in range(self.board.cols):
-                if not self.board.isCovered(i, j) and self.board.getNumber(i, j) > 0:
-                    neighbors = self.board.getNeighbors(i ,j)
-                    # count the flagged and covered neighbors
-                    flags = 0
-                    coveredAndNotFlagged = 0
-                    for neighbor in neighbors:
-                        if self.board.isFlag(*neighbor):
-                            flags += 1
-                        elif self.board.isCovered(*neighbor):
-                            coveredAndNotFlagged += 1
-                    # if there are any covered neighbors that do not have
-                    # flags, double-click on this tile
-                    if self.board.getNumber(i, j) == flags and coveredAndNotFlagged > 0:
-                        return (i, j)
-        # if we looped through all the tiles and didn't find a suitable
-        # candidate, return None
-        return None
+        self.queue = SolverQueue([])
 
-    def lookForFlag(self):
-        """
-        look for places where the number of covered
-        tiles is equal to the number of the tile.
-        Then we can flag the all the covered tiles
-        """
-        for i in range(self.board.rows):
-            for j in range(self.board.cols):
-                # check if uncovered and the number is not zero.
-                if not self.board.isCovered(i, j) and self.board.getNumber(i, j) > 0:
-                    neighbors = self.board.getNeighbors(i, j)
-                    # check the number of covered tiles
-                    covered = 0
-                    # see if any of these tiles are also unflagged
-                    neighborsToFlag = []
-                    for neighbor in neighbors:
-                        if self.board.isCovered(*neighbor):
-                            covered += 1
-                            if not self.board.isFlag(*neighbor):
-                                neighborsToFlag.append(neighbor)
-                    #check if this number is equal to the number on the tile
-                    if (len(neighborsToFlag) != 0) and (covered == self.board.getNumber(i, j)):
-                        return neighborsToFlag
-        # if we looped through all the tiles and didn't find a suitable
-        # candidate, return None
-        return None
+    # solving should use these three functions for information about the
+    # state of the board, not any info on the board object directly.
+    # No peeking!
+    def isCovered(self, row, col):
+        """ Helper function to find whether a board tile is covered """
+        return self.board.tiles[row][col].covered
 
-    def releaseWait(self):
-        """for debugging use only"""
-        self.waitForClick.set()
+    def isFlag(self, row, col):
+        """ Helper function to find whether a board tile is flagged """
+        return self.isCovered(row, col) and self.board.tiles[row][col].flag
 
-
-class BasicSolver(solver):
-    """
-    A first attempt at trying to figure out how to play minesweeper. Follows
-    just a few basic rules.
-    """
-    def guess(self):
-        """
-        Follows a few simple rules
-        1. The first guess (on a totally covered board) is random.
-        2. If the number of covered neighbors is equal to the number of the tile,
-        flag all the uncovered tiles
-        """
-        # take the first guess at random
-        if self.board.firstClick is True:
-            return [self.pickRandom()], 'click'
-        # print("It's not the first guess")
-
-        # First, look for places where the number of flagged tiles
-        # is equal to the number of the tile. Then we can double-click and
-        # clear all remaining covered tiles.
-        guess = self.lookForDoubleClick()
-        if guess is not None:
-            return [guess], 'double'
-        # If that didn't work, look for places where the number of covered
-        # tiles is equal to the number of the tile.
-        # Then we can flag the all the covered tiles
-        guess = self.lookForFlag()
-        if guess is not None:
-            return guess, 'flag'
-        # print("No obvious flags")
-        # if we haven't solved it by now, just pick something at random.
-        for _ in range(self.board.tileCount):
-            guess = self.pickRandom()
-            if self.board.isCovered(*guess) and not self.board.isFlag(*guess):
-                logging.info("Picking ({},{}) at random".format(guess[0], guess[1]))
-                return [guess], 'click'
-
-class AdvancedSolver(solver):
-    """
-    A more advanced version of the solver. Uses some of the same basic
-    techniques, but resorts to more sophisticated methods than guessing when
-    those fail.
-    """
-    def guess(self):
-        # logging.info("Starting Guess Function")
-        # take the first guess at random
-        if self.board.firstClick is True:
-            return [self.pickRandom()], 'click'
-        # print("It's not the first guess")
-
-        # First, look for places where the number of flagged tiles
-        # is equal to the number of the tile. Then we can double-click and
-        # clear all remaining covered tiles.
-        guess = self.lookForDoubleClick()
-        if guess is not None:
-            return [guess], 'double'
-        # If that didn't work, look for places where the number of covered
-        # tiles is equal to the number of the tile.
-        # Then we can flag the all the covered tiles
-        guess = self.lookForFlag()
-        if guess is not None:
-            return guess, 'flag'
-        # print("No obvious flags")
-        # if we haven't solved it by now, try to use a probabilistic method
-        # to guess which one works.
-        guess = self.guessWithProbability()
-        if guess is not None:
-            return guess
-
-    def guessWithProbability(self):
-        """
-        Generates a guess by computing the probability that each tile is a bomb.
-        Any tile that has a 0% probability can be cleared and any tile that
-        has 100% probability can be flagged
-        """
-        # compute the nearby flags for every tile on the board. We'll need
-        # it later.
-        self.nearbyFlags = self.getNearbyFlags()
-        # generate a list of all the tiles that *might* be bombs.
-        suspiciousTiles = []
-        # parallel list of just how supsicious the qualifiers are
-        suspiciousness = []
-        # count flags so we can find out how many mines there are
-        flagCounter = 0
-        # originally tried declaring all covered tiles as suspicious.
-        # Let's try declaring only covered tiles adjacent to an uncovered tile
-        for i in range(self.board.rows):
-            for j in range(self.board.cols):
-                if self.board.isCovered(i, j):
-                    if self.board.isFlag(i, j):
-                        flagCounter += 1
-                    else:
-                        neighbors = self.board.getNeighbors(i, j)
-                        for n in neighbors:
-                            if not self.board.isCovered(*n):
-                                suspiciousTiles.append((i, j))
-                                suspiciousness.append(0)
-                                break
-        numberOfMines = self.board.mines - flagCounter
-
-        #Next, generate a list of Combinationss of these suspicious tiles.
-        # note that this is very computationally intensive.
-        # Might have to find a way to randomly generate a smaller number of
-        # these and guess stochastically.
-        # generator = stochasticCombinationGenerator(suspiciousTiles, numberOfMines)
-        if len(suspiciousTiles) > POSSIBILITY_CAP:
-            generator = possibilityGenerator(suspiciousTiles, stochastic = True)
+    def getNumber(self, row, col):
+        """ Helper function to find how many times are near a tile """
+        if not self.isCovered(row, col):
+            return self.board.tiles[row][col].number
         else:
-            generator = possibilityGenerator(suspiciousTiles, stochastic = False)
-        # count the number of viable guesses
-        goodGuessCount = 0
+            message = "Cannot get number for {}: is covered".format((row, col))
+            raise SolverError(message)
 
-        # logging.info("There are {} suspicious tiles and {} bombs".format(
-        #     len(suspiciousTiles), numberOfMines))
-        # logging.info("This equates to {} combinations".format(generator.count()))
-        # logging.info("Generating {} possible bomb positions".format(num_samples))
-        i = 0                               # loop iterator
-        num_samples = generator.count()   # number of combinations to generate
-        while i < num_samples: # generate random combinations
-            combo = generator.next()
-            if len(combo) <= numberOfMines:
-                if self.isGoodGuess(combo):
-                    goodGuessCount += 1
-                    for mine in combo:
-                        suspiciousness[suspiciousTiles.index(mine)] += 1
-                # if i % 10000 == 0:
-                #     logging.info("Generated {} possibilities, {} were good".format(
-                #         i, goodGuessCount))
-            i += 1
-
-        # now loop through each suspicious tile and see if it has 0% or 100%
-        # probability of being a bomb.
-        clearTiles = []
-        flagTiles = []
-        for i in range(len(suspiciousTiles)):
-            if suspiciousness[i] == 0:
-                clearTiles.append(suspiciousTiles[i])
-            elif suspiciousness[i] == goodGuessCount:
-                flagTiles.append(suspiciousTiles[i])
-        if len(clearTiles):
-            logging.info("Found {} tiles (of {}) with 0% suspicion".format(len(clearTiles), len(suspiciousTiles)))
-            return [clearTiles[0]], 'click'
-        elif len(flagTiles):
-            logging.info("Found {} tiles with 100% suspicion".format(len(flagTiles)))
-            return [flagTiles[0]], 'flag'
-
-        # If we haven't found a tile with 0% probability, then click the tile
-        # with the lowest.
-        lowestSuspicion  = min(suspiciousness)
-        leastSuspiciousTile = suspiciousTiles[suspiciousness.index(lowestSuspicion)]
-        logging.info("Least Suspicious tile is {}, with probability = {:.2%}%".format(
-            leastSuspiciousTile, lowestSuspicion/ goodGuessCount))
-        return [leastSuspiciousTile], 'click'
-
-    def getNearbyFlags(self):
+    def getNeighbors(self, row, col):
         """
-        returns a nested list of the number of nearby flags for every tile on
-        the board
+        I keep calling this function my mistake, so I created it.
+        Calls self.board.getNeighbors()
         """
-        nearbyFlags = []
+        return self.board.getNeighbors(row, col)
+
+class BasicSolver(Solver):
+    """
+    Extends the solver class
+
+    Overwrites the guess method so that it can actually play minesweeper
+    """
+
+    def __init__(self, game):
+        """
+        Extend the constructor to add the solver tile data, which keeps track
+        of what the solver knows about a tile.
+        """
+        super().__init__(game)
+
+        logging.info("Initialized solver")
+        self.grid = SolverGrid(game)
+        return
+
+    def guess(self):
+        """
+        Applies two basic rules then guesses if that's unsuccessful
+        """
+        if self.board.firstClick:
+            self.queue.add(*self.pickRandom(), 'click')
+            return
+
+        # gather the basic info for each tile needed to make a decision.
+        self.gatherTileInfo()
+
+        self.guessWithBasicRules()
+
+        if len(self.queue):
+            return
+
+        self.guessAtRandom()
+        logging.info("Guessed {} at random".format(self.queue[0].getTile()))
+        return
+
+    def guessWithBasicRules(self):
+        """
+        Applies 2 basic rules.
+        1.  If the number on an uncovered tile is equal to the number of
+        covered tiles around it, flag all of them as bombs.
+        2. If the number on an uncovered tile is equal to the number of flags
+        nearby, click on all the remaining uncovered tiles, if any.
+        """
         for i in range(self.board.rows):
+            for j in range(self.board.cols):
+                tile = self.grid[i, j]
+                # if a tile has been marked as clear, it's because there is
+                # nothing interesting to find here.
+                if tile.clear:
+                    continue
+                if self.isCovered(i, j):
+                    continue
+                # if the number of neighbor flags is equal to the number of the tile,
+                # we can double-click the tile
+                if self.getNumber(i, j) == tile.nearbyFlags:
+                    # don't bother if there are no neighbors to flag
+                    if tile.nearbyCovered > tile.nearbyFlags:
+                        self.queue.add(i, j, 'double')
+                        return
+                # if the nearby covered tiles is equal to the number of the tile
+                # flag all the tiles that aren't already flagged.
+                elif self.getNumber(i, j) == tile.nearbyCovered:
+                    for neighbor in tile.neighbors:
+                        if self.isCovered(*neighbor):
+                            if not self.isFlag(*neighbor):
+                                self.queue.add(*neighbor, 'flag')
+                # if there are too few uncovered tiles to meet the number of mines,
+                # that's an error.
+                elif self.getNumber(i, j) < tile.nearbyFlags:
+                    message = "Error near tile {}: too many flags.".format((i, j))
+                    raise SolverError(message)
+        return
+
+    def guessAtRandom(self):
+        """
+        Guesses from among the tiles that are covered and adjacent to an
+        uncovered tile. If there are no such tiles, guesses at random from
+        among all covered tiles.
+        """
+        guessableTiles = []
+        for i in range(self.board.rows):
+            for j in range(self.board.cols):
+                tile = self.grid[i, j]
+                if tile.clear:
+                    continue
+                # do not guess any tiles that are already uncovered
+                if not self.isCovered(i, j):
+                    continue
+                # do not guess any flagged tiles.
+                if self.isFlag(i, j):
+                    continue
+
+                # if the covered tile has at least one uncovered tile
+                # then it becomes guessable.
+                for neighbor in tile.neighbors:
+                    if not self.isCovered(*neighbor):
+                        guessableTiles.append((i, j))
+                        break
+        # if we haven't found any guessable tiles, all the covered tiles are
+        # then guessable.
+        if len(guessableTiles) == 0:
+            for i in range(self.board.rows):
+                for j in range(self.board.cols):
+                    # do not guess any tiles that are already uncovered
+                    if not self.isCovered(i, j):
+                        continue
+                    # do not guess any tiles that are flagged
+                    if self.isFlag(i, j):
+                        continue
+                    guessableTiles.append((i, j))
+
+        randomTile = random.choice(guessableTiles)
+        self.queue.add(*randomTile, 'click')
+        return
+
+    def gatherTileInfo(self):
+        """
+        Finds the following data for a given tile.
+        -- Number of nearby flagged tiles
+        -- Number of nearby covered tiles
+        -- A list of the tile's neighbors
+        -- Whether the tile should be marked clear
+            (no covered, unflagged neighbor tiles)
+        """
+        for i in range(self.grid.rows):
+            for j in range(self.grid.cols):
+                tile = self.grid[i, j]
+
+                if tile.clear:
+                    continue
+
+                if tile.neighbors is None:
+                    tile.neighbors = self.getNeighbors(i, j)
+
+                if self.isCovered(i, j):
+                    continue
+
+                # count the nearby flagged tiles
+                # count the nearby covered tiles.
+                tile.nearbyCovered = 0
+                tile.nearbyFlags = 0
+                for ni, nj in tile.neighbors:
+                    if self.isCovered(ni, nj):
+                        tile.nearbyCovered += 1
+                        if self.isFlag(ni, nj):
+                            tile.nearbyFlags += 1
+                # check if the tile should be clear.
+                if tile.nearbyCovered == tile.nearbyFlags:
+                    if tile.nearbyCovered == self.getNumber(i, j):
+                        tile.clearTile()
+                    else:
+                        message = "Tile {} was has {} flags nearby. ".format(
+                            (i, j), tile.nearbyFlags)
+                        raise SolverError(message)
+
+        return
+
+    def reset(self):
+        """
+        Deletes all the stored information about the state of the board.
+        """
+        self.grid = SolverGrid(self.board)
+        self.queue = SolverQueue([])
+
+class AdvancedSolver(BasicSolver):
+    """
+    This solver allows for more advanced solutions of minesweeper by
+    accounting for second neighbors (neighbors of neighbors) when deciding
+    which tiles near a given uncovered tiles can be bombs.
+    """
+
+    def guess(self):
+        """
+        Applies two rules
+        -- If the number on a tile is equal to the number of covered tiles
+            nearby, then flag all the covered tiles nearby.
+        -- If the number on the tile is equal to the number of flagged tiles
+            nearby, double-click the tile to uncover any nearby covered tiles.
+        If the above rules cannot be applied, considers every possible
+        combination of mines that could be placed around every tile.
+        -- If a combination places too many or too few mines near a neighboring
+            tile, then it is not a viable combination.
+        -- If a tile has only one viable combination of mines, flag the tiles
+            corresponding to that combination.
+        If the above rules cannot be used to make a guess, consider every
+        board-wide meta-combination of combinations.
+        -- If a meta-combination has more mines than the total number of mines
+            on the board, it's not viable.
+        -- If a meta-combination places too many or too few mines near a
+            particular tile, it's not viable.
+        -- For each viable meta-combination, increment a suspicion value for
+            every mine in the meta-combination
+        -- Once every combination has been analyzed, flag all the tiles that
+            have 100% suspicion, and clear all the tiles that have 0% suspicion
+        -- If that fails, clear the tile with the lowest suspicion.
+        """
+        if self.board.firstClick:
+            self.queue.add(*self.pickRandom(), 'click')
+            return
+
+        # gather the basic info for each tile needed to make a decision.
+        # use a simple formula to make a guess
+        self.gatherNeighborInfo()
+        self.guessWithBasicRules()
+
+        if len(self.queue):
+            return
+
+        # use a more complicated formula to make a guess
+        self.gatherSecondNeighborInfo()
+        self.advancedGuess()
+
+        # finally, use the very computationally-intense method to make a guess
+        # IDEA: put this in another thread and use a watchdog to kill it after
+        # it runs for too long.
+        self.calculateSuspicions()
+        self.guessFromSuspicions()
+
+        if len(self.queue):
+            return
+
+        leastSuspiciousTile = None
+        lowestSuspicion = 0
+        for i in range(self.grid.rows):
+            for j in range(self.grid.rows):
+                tile = self.grid[i][j]
+                if tile.suspicion == 0:
+                    self.queue.add(i, j, 'click')
+                elif tile.suspicion == self.comboCounter:
+                    self.queue.add(i, j, 'flag')
+                else:
+                    leastSuspicousTile = (i, j)
+                    lowestSuspicion = tile.suspicion
+
+        if len(self.queue) == 0:
+            self.queue.add(*leastSuspicousTile, 'click')
+            return
+
+        self.guessAtRandom()
+        logging.info("Guessed {} at random".format(self.queue[0].getTile()))
+        return
+
+    def advancedGuess(self):
+        for i in range(self.board.rows):
+            for j in range(self.board.cols):
+                tile = self.grid[i, j]
+
+                # look for tiles in every good combination and in no
+                # good combination.
+                definitelyMines = tile.suspiciousNeighbors
+                definitelyClear = tile.suspiciousNeighbors
+
+                for combo in tile.goodCombos:
+                    # Any tile not in the current combo is not definitely a mine
+                    definitelyMines.intersection_update(combo)
+                    # definitelyMines &= combo
+                    # remove any tile in the current combo from inNoCombo
+                    definitelyClear.difference_update(combo)
+                    # definitelyClear -= combo
+                    # this might speed things up a bit.
+                    if len(inEveryCombo) == 0 and len(inNoCombo) == 0:
+                        break
+
+                # checking that the sets are empty is actually unnecessary
+                # if they are empty the for loop won't do anything.
+                for mine in definitelyMines:
+                    self.queue.add(*mine, 'flag')
+
+                for clearTile in definitelyClear:
+                    self.queue.add(*clearTile, 'click')
+
+    def guessFromSuspicions(self):
+        self.guessAtRandom()
+        return
+
+    def gatherNeighborInfo(self):
+        """
+        Finds the following data for every tile.
+        -- Number of nearby flagged tiles
+        -- Number of nearby covered tiles
+        -- A list of the tile's neighbors
+        -- A list of *suspicious* neighbors* (covered but not flagged)
+        -- Whether the tile should be marked clear (no suspicious neighbors)
+        Also counts the number of flags on the board.
+        """
+        # start a counter for the flags on the board.
+        self.grid.flagCounter = 0
+        for i in range(self.board.rows):
+            for j in range(self.board.cols):
+                tile = self.grid[i][j]
+                if tile.clear:
+                    continue
+
+                if tile.neighbors is None:
+                    tile.neighbors = self.getNeighbors(i, j)
+
+                if self.isCovered(i, j):
+                    if self.isFlag(i, j):
+                        self.grid.flagCounter += 1
+                    continue
+
+
+                # the suspicious neighbors are a list of tiles that are
+                # both covered and not flagged. Will come in handly later.
+                tile.suspiciousNeighbors = set()
+                tile.nearbyCovered = 0
+                tile.nearbyFlags = 0
+                for neighbor in tile.neighbors:
+                    if self.isCovered(*neighbor):
+                        tile.nearbyCovered += 1
+                        if self.isFlag(*neighbor):
+                            tile.nearbyFlags += 1
+                        else:
+                            tile.suspiciousNeighbors.add(neighbor)
+                if len(tile.suspiciousNeighbors) == 0:
+                    tile.clearTile()
+
+        return
+
+    def gatherSecondNeighborInfo(self):
+        """
+        Calculates the following information for every tile
+        -- A list of the viable combinations of suspicious tiles.
+        """
+        # generate the list of suspicious neighbors
+        for i in range(self.board.rows):
+            for j in range(self.board.cols):
+                tile = self.grid[i][j]
+
+                if tile.clear:
+                    continue
+
+                if self.isCovered(i, j):
+                    continue
+
+                # create an iterator of all the combinations of mines.
+                missingMines = tile.nearbyCovered - tile.nearbyFlags
+                comboIterator = itertools.combinations(tile.suspiciousNeighbors, missingMines)
+
+                # create a list of good combinations.
+                tile.goodCombos = []
+
+                # create a list of all the second neighbors (neighbors of neighbors)
+                secondNeighbors = tile.neighbors
+                for neighbor in tile.neighbors:
+                    secondNeighbors.update(self.grid[neighbor].neighbors)
+
+                # iterate through all the combinations.
+                for combo in comboIterator:
+                    badCombo = False
+                    for neighbor in secondNeighbors:
+                        # no real useful information from covered tiles.
+                        if self.isCovered(*neighbor):
+                            continue
+                        neighborTile = self.grid[neighbor]
+                        # find the number of missing mines near this tile
+                        # should not be zero.
+                        missingMines = neighborTile.nearbyCovered - neighborTile.nearbyFlags
+                        # the combo is a set of mines near the tile in focus.
+                        # check how many mines this combo puts near this neighbor
+                        minesNearNeighbor = neighborTile.suspiciousNeighbors.intersection(combo)
+                        # check how many mines are "missing" near the neighbor
+                        # if there are too many mines, this isn't a good combo.
+                        if len(minesNearNeighbor) > missingMines:
+                            break
+                        # check if this combo puts too *few* mines near a neighbor
+                        remainingSuspiciousNeighbors = neighborTile.suspiciousNeighbors - combo
+                        if len(remainingSuspiciousNeighbors) < missingMines - len(minesNearNeighbor):
+                            break
+                    else:
+                        tile.goodCombos.append(combo)
+
+    def calculateSuspicions(self):
+        """
+        Calculates a suspicion value associated with each tile
+        """
+        pass
+
+class SolverGrid(object):
+    """
+    A class to store and access the SolverTile object associated with all the
+    tiles on the board.
+    """
+    def __init__(self, board):
+        """
+        Takes the board as input and initializes all of the data objects
+        """
+        self.rows = board.rows
+        self.cols = board.cols
+
+        self.tiles = []
+        for i in range(self.rows):
             row = []
-            for j in range(self.board.cols):
-                neighbors = self.board.getNeighbors(i, j)
-                row.append(sum(self.board.isFlag(*n) for n in neighbors))
-            nearbyFlags.append(row)
-        return nearbyFlags
+            for j in range(self.cols):
+                newTile = SolverTile()
+                row.append(newTile)
+            self.tiles.append(row)
+        return
 
-    def isGoodGuess(self, combo):
+    def __getitem__(self, i, j = None):
         """
-        Checks whether a set of bomb positions contradicts the numbers visible
-        on the board
+        Will allow grid[i, j], grid[i][j] and grid[(i, j)]
         """
-        for i in range(self.board.rows):
-            for j in range(self.board.cols):
-                if not self.board.isCovered(i, j):
-                    # check the number of nearby bombs in this Combination
-                    neighbors = self.board.getNeighbors(i, j)
-                    suspects = sum([n in combo for n in neighbors])
-                    if suspects + self.nearbyFlags[i][j] != self.board.getNumber(i, j):
-                        return False
+        try:
+            return self.tiles[i][j]
+        except TypeError: # list indices must be integers or slice
+            if j is None:
+                try:
+                    i, j = i
+                    return self.tiles[i][j]
+                except TypeError: # Cannot unpack non-iterable int
+                    return self.tiles[i]
 
-        return True
-
-class Looper(object):
-    def __init__(self, solverType):
-        self.games = 0
-        self.wins = 0
-        self.losses = 0
-        b = computerBoard(*board.EXPERT)
-        while (1):
-            try:
-                s = solverType(b)
-                win = s.start()
-                self.games += 1
-                if win is None:
-                    pass
-                elif win is True:
-                    self.wins += 1
-                elif win is False:
-                    self.losses += 1
-            except KeyboardInterrupt:
-                self.printLogs()
-    def printLogs(self):
-        logging.info("Won: \t{}".format(self.wins))
-        logging.info("Lost:\t{}".format(self.losses))
-        logging.info("Games:\t{}".format(self.games))
-        logging.info("Win pct:\t{:.1f%}".format(self.wins / self.games))
-
-    def __del__(self):
-        self.printLogs
-
-class stochasticCombinationGenerator(object):
+class SolverTile(object):
     """
-    A class to generate random Combinations of a list
+    A class to hold info that we gather about a particular tile as we gather it
     """
-    def __init__(self, L, samples):
-        self.original = L
-        self.samples = samples
-        # set up rng
-        random.seed()
-
-    def next(self):
+    def __init__(self):
         """
-        A method to generate the next Combination
+        Always have the clear field, but everything else will be initialized
+        and destroyed as needed
         """
-        return random.sample(self.original, k = self.samples)
+        self.clear = False
+        self.neighbors = None
 
-class possibilityGenerator(object):
+    def clearTile(self):
+        """
+        Set the clear flag to false and destroy all other variables
+        """
+        # This is kinda hacky but let's see how it goes.
+        contents = list(self.__dict__)
+        for key in contents:
+                self.__delattr__(key)
+        self.clear = True
+        return
+
+class SolverQueue(deque):
     """
-    Given a list of tiles, generates all possibilities for which will be mines
-    and which won't
+    Extends the collections.deque by adding methods to
+    -- add a QueueItem object without calling its constructor
+    -- prevent duplicate tiles from being added to the queue
     """
-    def __init__(self, L, stochastic = False):
-        self.original = L
-        self.counter = 1
-        self.formatSpecifier = '0'+ str(len(self.original)) + 'b'
-        self.stochastic = stochastic
-        if stochastic:
-            random.seed()
-            self.counter = -1
+    def add(self, row, column, action = 'click'):
+        """
+        Checks whether a function is already in the queue. Returns False if it
+        is, adds the object and returns True if it isn't.
+        """
+        if (row, column) in self:
+            return False
+        else:
+            self.append(QueueItem(row, column, action))
+            return True
+# end class SolverQueue
 
-    def next(self):
-        mines = []
-        if self.counter.bit_length() <= len(self.original):
-            # mask = self.counter.to_bytes(len(self.original), byteorder = 'big')
-            if self.counter == -1:
-                mask = format(random.getrandbits(len(self.original)), self.formatSpecifier)
-            else:
-                mask = format(self.counter, self.formatSpecifier)
-                self.counter += 1
-            # print(mask)
-            for i in range(len(self.original)):
-                if mask[i] == '1':
-                    mines.append(self.original[i])
+class QueueItem(object):
+    """
+    A helper class to manage the list of names from the solver.
+    """
+    def __init__(self, row, column, action = 'click'):
+        self.row = row
+        self.col = column
+        self.action = action
+        return
 
-        return mines
+    def __eq__(self, other):
+        """
+        Should work on another QueueItem or a (row, column) tuple
+        Compares on row and column, NOT on action.
+        """
+        # try the case where the object is a QueueItem or something
+        # resembling it.
+        try:
+            return other.row == self.row and other.col == self.col
+        # try the case where the object is a tuple.
+        except AttributeError:
+            row, column, *_ = other
+            return row == self.row and column == self.col
 
-    def count(self):
-        if self.counter == -1:
-            return NUM_RANDOM_GUESSES
-        return 2**len(self.original)
+    def getTile(self):
+        return (self.row, self.col)
+
+    def getAction(self):
+        return self.action
+# end class QueueItem
+
+class SolverError(Exception):
+    """
+    An error type for dealing with problems that occur with the board
+    Allows me to put error messages and distinguish between logical errors and
+    syntax or other Runtime Errors.
+    """
+    def __init__(self, message):
+        self.message = message
+
+    def __str__(self):
+        return self.message
+
+def waitUntil(endTime):
+    """
+    Probably not function-worthy
+    """
+    currentTime = time.time()
+    if currentTime < endTime:
+        time.sleep(endTime - currentTime)
+    return
+
+def test():
+    """
+    Kind of a playground to test smaller bits of code
+    """
+    b = board.Board(board.BEGINNER)
+    s = BasicSolver(b)
+    coords = (2, 3)
+    print(s.grid[coords])
+    print(s.grid[(2, 3)])
+    print(s.grid[2, 3])
 
 def main():
-    logging.basicConfig(format = "%(message)s", level = logging.INFO)
-    loops = Looper(AdvancedSolver)
-
-if __name__ == "__main__":
+    # test()
+    b = board.Board(board.BEGINNER)
+    s = AdvancedSolver(b)
+    s.start()
+if __name__ == '__main__':
     main()
